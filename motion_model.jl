@@ -111,7 +111,7 @@ function p_y_given_x(X::Matrix{Float64}, y::Vector{Float64}, station_positions::
 
 end
 
-function sis(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMatrix{2,6,Float64}, ς_squared::Float64)
+function sis(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMatrix{2,6,Float64}, functions_to_estimate::AbstractVector{<:Function}, function_range_dims::Vector{Int}, ς_squared::Float64, return_ω::Bool)
     """
     # Sequential Importance Sampling (SIS) algorithm
 
@@ -120,19 +120,31 @@ function sis(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMa
     n_particles : number of particles to use in the algorithm
     stop_time : number of time steps to simulate
     station_positions : 2 x 6 matrix of station positions
+    functions_to_estimate : array of functions for which to estimate the process mean
+    function_range_dims : array of dimensions of range for each function to estimate
     
     ## Returns:
     Matrix{stop_time, 6, Float64}
         process mean estimates
     """
     @assert stop_time <= size(y, 2) "stop_time exceeds the number of measurements"
+    n_functions = size(functions_to_estimate, 1)
     X = Matrix(rand(MvNormal(zeros(6), Diagonal([500, 5, 5, 200, 5, 5])), n_particles)')
     ω = p_y_given_x(X, y[:, 1], station_positions, ς_squared)  # Weights for the particles
     noise_distribution = MvNormal(zeros(2), σ_squared .* Matrix{Float64}(I, 2, 2))
     Z = rand(1:5, n_particles)  # Randomly select the initial Z state for each particle
-    τ = zeros(Float64, stop_time, 6)  # Process mean estimate
+    #= τ = zeros(Float64, stop_time, 6)  # Process mean estimate
     for i = 1:6
         τ[1, i] = sum(ω .* X[:, i]) / sum(ω)  # Process mean estimate
+    end =#
+    ω_sequence = zeros(Float64, n_particles, stop_time) # Store the weights for each time step
+    ω_sequence[:, 1] = ω  # Store the weights for the first time step
+    τ = [zeros(Float64, stop_time, d) for d ∈ function_range_dims]  # Process mean estimate
+    for i = 1:n_functions
+        ϕ_X = functions_to_estimate[i](X, 1, ω)  # Apply the function ϕ to the resampled particles
+        for j = 1:function_range_dims[i]
+            τ[i][1, j] = sum(ω .* ϕ_X[:, j]) / sum(ω)# Process mean estimate
+        end
     end
     progress = Progress((stop_time - 1), "u better work sis <3")
     transition_distributions = [Categorical(P[i, :]) for i = 1:5]
@@ -141,15 +153,29 @@ function sis(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMa
         X = update_particles(X, Z, Matrix(rand(noise_distribution, n_particles)'))
         Z = [rand(transition_distributions[Z[i]]) for i = 1:n_particles] # Couldn't avoid this for loop ;-;
         ω .*= p_y_given_x(X, y[:, t], station_positions, ς_squared)  # Update weights based on the new measurements
-        for i = 1:6
+        #= for i = 1:6
             τ[t, i] = sum(ω .* X[:, i]) / sum(ω)  # Process mean estimate
+        end =#
+        for i = 1:n_functions
+            ϕ_X = functions_to_estimate[i](X, t, ω)  # Apply the function ϕ to the resampled particles
+            for j = 1:function_range_dims[i]
+                τ[i][t, j] = sum(ω .* ϕ_X[:, j]) / sum(ω)  # Process mean estimate
+            end
         end
+
         if all(ω .== 0)
-            return τ
+            break
+        end
+        if return_ω
+            ω_sequence[:, t] = ω  # Store the weights for each time step
         end
         next!(progress)
     end
-    return τ
+    if return_ω
+        return τ, ω_sequence
+    else
+        return τ
+    end
 end
 
 function sisr(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMatrix{2,6,Float64}, functions_to_estimate::AbstractVector{<:Function}, function_range_dims::Vector{Int}, ς_squared::Float64, track_progress::Bool=true)
@@ -177,7 +203,7 @@ function sisr(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SM
     n_functions = size(functions_to_estimate, 1)
     τ = [zeros(Float64, stop_time, d) for d ∈ function_range_dims]  # Process mean estimate
     for i = 1:n_functions
-        ϕ_X = functions_to_estimate[i](X, 1)  # Apply the function ϕ to the resampled particles
+        ϕ_X = functions_to_estimate[i](X, 1, ω)  # Apply the function ϕ to the resampled particles
         for j = 1:function_range_dims[i]
             τ[i][1, j] = sum(ϕ_X[:, j]) / n_particles  # Process mean estimate
         end
@@ -196,17 +222,12 @@ function sisr(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SM
         resampling_indices = rand(Categorical(ω ./ sum(ω)), n_particles)  # Resample indices based on weights
         X = X[resampling_indices, :]  # Resample the particles
         for i = 1:n_functions
-            ϕ_X = functions_to_estimate[i](X, t)  # Apply the function ϕ to the resampled particles
+            ϕ_X = functions_to_estimate[i](X, t, ω)  # Apply the function ϕ to the resampled particles
             for j = 1:function_range_dims[i]
                 τ[i][t, j] = sum(ϕ_X[:, j]) / n_particles  # Process mean estimate
             end
         end
-        #= ϕ_X = ϕ(X)  # Apply the function ϕ to the resampled particles
 
-        for i = 1:6
-            τ[t, i] = sum(ϕ_X[:, i]) / n_particles  # Process mean estimate
-        end =#
-        # Resample the particles based on the weights
         if track_progress
             next!(progress)
         end
@@ -239,7 +260,7 @@ function ς_grid_search(y::Matrix, n_particles::Int, stop_time::Int, station_pos
     for i in 1:n_ς
         ς_squared = ς_values[i]^2
         estimates = sisr(y, n_particles, stop_time, station_positions,
-            [(x, t) -> x, (x, t) -> log.(p_y_given_x(x, y[:, t], station_positions, ς_squared))], [6, 1], ς_squared, false)
+            [(x, t, ω) -> x, (x, t, ω) -> log.(p_y_given_x(x, y[:, t], station_positions, ς_squared))], [6, 1], ς_squared, false)
         x_estimates[i, :, :] = estimates[1]
         log_likelihood_estimates[i, :] = estimates[2]
         next!(progress)
