@@ -133,10 +133,6 @@ function sis(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMa
     ω = p_y_given_x(X, y[:, 1], station_positions, ς_squared)  # Weights for the particles
     noise_distribution = MvNormal(zeros(2), σ_squared .* Matrix{Float64}(I, 2, 2))
     Z = rand(1:5, n_particles)  # Randomly select the initial Z state for each particle
-    #= τ = zeros(Float64, stop_time, 6)  # Process mean estimate
-    for i = 1:6
-        τ[1, i] = sum(ω .* X[:, i]) / sum(ω)  # Process mean estimate
-    end =#
     ω_sequence = zeros(Float64, n_particles, stop_time) # Store the weights for each time step
     ω_sequence[:, 1] = ω  # Store the weights for the first time step
     τ = [zeros(Float64, stop_time, d) for d ∈ function_range_dims]  # Process mean estimate
@@ -153,11 +149,8 @@ function sis(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SMa
         X = update_particles(X, Z, Matrix(rand(noise_distribution, n_particles)'))
         Z = [rand(transition_distributions[Z[i]]) for i = 1:n_particles] # Couldn't avoid this for loop ;-;
         ω .*= p_y_given_x(X, y[:, t], station_positions, ς_squared)  # Update weights based on the new measurements
-        #= for i = 1:6
-            τ[t, i] = sum(ω .* X[:, i]) / sum(ω)  # Process mean estimate
-        end =#
         for i = 1:n_functions
-            ϕ_X = functions_to_estimate[i](X, t, ω)  # Apply the function ϕ to the resampled particles
+            ϕ_X = functions_to_estimate[i](X, t, ω)  # Apply the function ϕ to the simulated particles
             for j = 1:function_range_dims[i]
                 τ[i][t, j] = sum(ω .* ϕ_X[:, j]) / sum(ω)  # Process mean estimate
             end
@@ -203,7 +196,7 @@ function sisr(y::Matrix, n_particles::Int, stop_time::Int, station_positions::SM
     n_functions = size(functions_to_estimate, 1)
     τ = [zeros(Float64, stop_time, d) for d ∈ function_range_dims]  # Process mean estimate
     for i = 1:n_functions
-        ϕ_X = functions_to_estimate[i](X, 1, ω)  # Apply the function ϕ to the resampled particles
+        ϕ_X = functions_to_estimate[i](X, 1, ω)  # Apply the function ϕ to the simulated particles
         for j = 1:function_range_dims[i]
             τ[i][1, j] = sum(ϕ_X[:, j]) / n_particles  # Process mean estimate
         end
